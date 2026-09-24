@@ -5,6 +5,7 @@
 
     <application
         android:allowBackup="true"
+        android:hardwareAccelerated="true"
         android:label="Dado Virtual"
         android:supportsRtl="true"
         android:theme="@style/Theme.DadoVirtual">

@@ -191,3 +191,20 @@ body.light .slider { background: rgba(0,0,0,.2); }
     pointer-events: none;
     transition: opacity .3s;
 }
+
+#errorBox {
+    position: fixed;
+    z-index: 100;
+    top: 90px;
+    left: 8px;
+    right: 8px;
+    background: rgba(180,30,30,.92);
+    color: #fff;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    display: none;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+#errorBox:empty { display: none; }

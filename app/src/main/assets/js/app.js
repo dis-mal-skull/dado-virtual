@@ -1,6 +1,13 @@
 /* Dado Virtual - app principal
    Three.js + cannon.js : dado 3D con físicas reales */
 
+/* ---------- Manejo global de errores ---------- */
+window.onerror = function (msg, src, line) {
+    var el = document.getElementById('errorBox');
+    if (el) el.textContent = 'Error: ' + msg + ' (línea ' + line + ')';
+    return false;
+};
+
 var DIE_SIZE = 1.0;
 var DICE_TYPES = [
     { id: 'd4', label: 'D4', faces: 4, rpg: true },
@@ -24,10 +31,10 @@ var PIPS = {
 
 /* ---------- Estado ---------- */
 var settings = loadSettings();
-var history = [];
+var rollHistory = [];
 var totalRolls = 0;
 var dieType = 'd6';
-var rolling = false;
+var rollInProgress = false;
 
 function loadSettings() {
     var s = { color: '#e63946', vibrate: true, sound: true, shake: true, two: false, theme: 'dark' };
@@ -43,12 +50,12 @@ function saveSettings() {
 function loadHistory() {
     try {
         var raw = localStorage.getItem('dv_history');
-        if (raw) history = JSON.parse(raw);
+        if (raw) rollHistory = JSON.parse(raw);
     } catch (e) {}
-    history = history.slice(0, 50);
+    rollHistory = rollHistory.slice(0, 50);
 }
 function saveHistory() {
-    try { localStorage.setItem('dv_history', JSON.stringify(history.slice(0, 50))); } catch (e) {}
+    try { localStorage.setItem('dv_history', JSON.stringify(rollHistory.slice(0, 50))); } catch (e) {}
 }
 function loadTotal() {
     try {
@@ -72,69 +79,86 @@ function saveStats(stats) {
 
 /* ---------- Escena Three.js ---------- */
 var container = document.getElementById('scene-container');
-var scene = new THREE.Scene();
-var camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
-camera.position.set(3.5, 4.2, 6.5);
-camera.lookAt(0, 0.3, 0);
-
-var renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-container.appendChild(renderer.domElement);
-
-var ambient = new THREE.AmbientLight(0xffffff, 0.6);
-scene.add(ambient);
-var dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-dirLight.position.set(6, 12, 8);
-dirLight.castShadow = true;
-dirLight.shadow.mapSize.width = 1024;
-dirLight.shadow.mapSize.height = 1024;
-scene.add(dirLight);
-var backLight = new THREE.DirectionalLight(0x88aaff, 0.3);
-backLight.position.set(-5, 4, -6);
-scene.add(backLight);
-
-var tableMat = new THREE.MeshStandardMaterial({ color: 0x7a5a2e, roughness: 0.7, metalness: 0.1 });
-var table = new THREE.Mesh(new THREE.BoxGeometry(8, 0.5, 8), tableMat);
-table.position.y = -0.3;
-table.receiveShadow = true;
-scene.add(table);
-
-var ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(60, 60),
-    new THREE.MeshStandardMaterial({ color: 0x000000, roughness: 1 })
-);
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.55;
-ground.receiveShadow = true;
-scene.add(ground);
-
-/* ---------- Mundo cannon.js ---------- */
-var world = new CANNON.World();
-world.gravity.set(0, -9.82, 0);
-world.broadphase = new CANNON.NaiveBroadphase();
-world.solver.iterations = 10;
-
-var dieMaterial = new CANNON.Material('die');
-var tableMaterial = new CANNON.Material('table');
-var contact = new CANNON.ContactMaterial(dieMaterial, tableMaterial, { friction: 0.2, restitution: 0.35 });
-world.addContactMaterial(contact);
-
-var tableBody = new CANNON.Body({ mass: 0, material: tableMaterial });
-tableBody.addShape(new CANNON.Box(new CANNON.Vec3(4, 0.25, 4)));
-tableBody.position.y = -0.3;
-world.addBody(tableBody);
-
+var scene, camera, renderer, world, tableBody, wallBodies = [];
+var dieMaterial, tableMaterial;
 var activeDice = [];
+
+function init3D() {
+    scene = new THREE.Scene();
+
+    camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 4.2, 8.5);
+    camera.lookAt(0, 0.5, 0);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    try {
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    } catch (e) {}
+    container.appendChild(renderer.domElement);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+    var dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+    dirLight.position.set(5, 10, 6);
+    scene.add(dirLight);
+    scene.add(new THREE.DirectionalLight(0x88aaff, 0.35).translateX(-6));
+
+    /* Mesa (suelo) */
+    var tableMat = new THREE.MeshStandardMaterial({ color: 0x2c3e50, roughness: 0.8, metalness: 0.1 });
+    var table = new THREE.Mesh(new THREE.BoxGeometry(7, 0.5, 7), tableMat);
+    table.position.y = -0.25;
+    table.receiveShadow = true;
+    scene.add(table);
+
+    /* Paredes alrededor para que el dado rebote */
+    var wallMat = new THREE.MeshStandardMaterial({
+        color: 0x1c2833, roughness: 0.9, transparent: true, opacity: 0.35
+    });
+    var wallH = 2.4, t = 3.5;
+    var wallDefs = [
+        { w: 7.2, h: wallH, d: 0.4, x: 0, y: wallH / 2 - 0.25, z: t },
+        { w: 7.2, h: wallH, d: 0.4, x: 0, y: wallH / 2 - 0.25, z: -t },
+        { w: 0.4, h: wallH, d: 7.2, x: t, y: wallH / 2 - 0.25, z: 0 },
+        { w: 0.4, h: wallH, d: 7.2, x: -t, y: wallH / 2 - 0.25, z: 0 }
+    ];
+    wallDefs.forEach(function (w) {
+        var m = new THREE.Mesh(new THREE.BoxGeometry(w.w, w.h, w.d), wallMat);
+        m.position.set(w.x, w.y, w.z);
+        scene.add(m);
+    });
+
+    /* Mundo físico */
+    world = new CANNON.World();
+    world.gravity.set(0, -9.82, 0);
+    world.broadphase = new CANNON.NaiveBroadphase();
+    world.solver.iterations = 10;
+
+    dieMaterial = new CANNON.Material('die');
+    tableMaterial = new CANNON.Material('table');
+    var contact = new CANNON.ContactMaterial(dieMaterial, tableMaterial, { friction: 0.25, restitution: 0.4 });
+    world.addContactMaterial(contact);
+
+    tableBody = new CANNON.Body({ mass: 0, material: tableMaterial });
+    tableBody.addShape(new CANNON.Box(new CANNON.Vec3(3.5, 0.25, 3.5)));
+    tableBody.position.y = -0.25;
+    world.addBody(tableBody);
+
+    wallDefs.forEach(function (w) {
+        var b = new CANNON.Body({ mass: 0 });
+        b.addShape(new CANNON.Box(new CANNON.Vec3(w.w / 2, w.h / 2, w.d / 2)));
+        b.position.set(w.x, w.y, w.z);
+        world.addBody(b);
+        wallBodies.push(b);
+    });
+}
 
 function resetWorld() {
     for (var i = 0; i < activeDice.length; i++) {
         var d = activeDice[i];
-        scene.remove(d.mesh);
-        if (d.pips) d.pips.forEach(function (p) { scene.remove(p); });
-        world.removeBody(d.body);
+        if (d.mesh) scene.remove(d.mesh);
+        if (d.body) world.removeBody(d.body);
     }
     activeDice = [];
 }
@@ -159,20 +183,6 @@ function centroid(verts) {
     return [c[0] / verts.length, c[1] / verts.length, c[2] / verts.length];
 }
 
-function orderPolygon(face, normal, verts) {
-    var cent = centroid(face.map(function (i) { return verts[i]; }));
-    var ref = normV(subV(verts[face[0]], cent));
-    var orth = normV(crossV(normal, ref));
-    var sorted = face.slice().sort(function (a, b) {
-        var va = subV(verts[a], cent), vb = subV(verts[b], cent);
-        var angA = Math.atan2(dotV(va, orth), dotV(va, ref));
-        var angB = Math.atan2(dotV(vb, orth), dotV(vb, ref));
-        return angA - angB;
-    });
-    return sorted;
-}
-
-/* Poliedros regulares: de THREE.Geometry agrupamos triángulos por normal para obtener caras */
 function polyhedronFaces(geometry) {
     var verts = geometry.vertices.map(function (v) { return [v.x, v.y, v.z]; });
     var tris = geometry.faces.map(function (f) {
@@ -204,23 +214,107 @@ function polyhedronFaces(geometry) {
     return { vertices: vlist, faces: polys.map(function (p) { return p.idx; }) };
 }
 
-/* d10: bipirámide pentagonal (10 caras triangulares) */
+/* Datos estándar de poliedros (vértices + caras triangulares), independientes de THREE.Geometry */
+var POLY_DATA = {
+    d4: {
+        vertices: [[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]],
+        faces: [[2, 1, 0], [0, 3, 2], [1, 3, 0], [2, 3, 1]]
+    },
+    d8: {
+        vertices: [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]],
+        faces: [[0, 2, 4], [0, 4, 3], [0, 3, 5], [0, 5, 2],
+                [1, 2, 5], [1, 5, 3], [1, 3, 4], [1, 4, 2]]
+    },
+    d20: {
+        vertices: [
+            [-1, 1.618, 0], [1, 1.618, 0], [-1, -1.618, 0], [1, -1.618, 0],
+            [0, -1, 1.618], [0, 1, 1.618], [0, -1, -1.618], [0, 1, -1.618],
+            [1.618, 0, -1], [1.618, 0, 1], [-1.618, 0, -1], [-1.618, 0, 1]
+        ],
+        faces: [
+            [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+            [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+            [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+            [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]
+        ]
+    }
+};
+
+function tetraFaces() {
+    var data = POLY_DATA.d4;
+    return polyFromTris(data.vertices, data.faces);
+}
+function octaFaces() {
+    var data = POLY_DATA.d8;
+    return polyFromTris(data.vertices, data.faces);
+}
+function icosaFaces() {
+    var data = POLY_DATA.d20;
+    return polyFromTris(data.vertices, data.faces);
+}
+
+/* Convierte un poliedro con caras triangulares a caras poligonales únicas */
+function polyFromTris(verts, tris) {
+    var used = new Array(tris.length).fill(false);
+    var polys = [];
+    for (var i = 0; i < tris.length; i++) {
+        if (used[i]) continue;
+        var set = new Set();
+        var base = faceNormal(verts, tris[i]);
+        for (var j = 0; j < tris.length; j++) {
+            if (used[j]) continue;
+            if (dotV(base, faceNormal(verts, tris[j])) > 0.95) {
+                used[j] = true;
+                set.add(tris[j][0]); set.add(tris[j][1]); set.add(tris[j][2]);
+            }
+        }
+        polys.push({ idx: Array.from(set) });
+    }
+    return { vertices: verts, faces: polys.map(function (p) { return p.idx; }) };
+}
+
 function decahedron() {
     var verts = [];
-    var top = 1.4, r = 1.0;
-    verts.push([0, top, 0]);
-    verts.push([0, -top, 0]);
+    verts.push([0, 1.4, 0]);
+    verts.push([0, -1.4, 0]);
     for (var k = 0; k < 5; k++) {
         var a = 2 * Math.PI * k / 5;
-        verts.push([r * Math.cos(a), 0, r * Math.sin(a)]);
+        verts.push([Math.cos(a), 0, Math.sin(a)]);
     }
     var faces = [];
     for (var k2 = 0; k2 < 5; k2++) {
         var e1 = 2 + k2, e2 = 2 + ((k2 + 1) % 5);
-        faces.push([0, e1, e2]);       // cara superior
-        faces.push([1, e2, e1]);       // cara inferior
+        faces.push([0, e1, e2]);
+        faces.push([1, e2, e1]);
     }
     return { vertices: verts, faces: faces };
+}
+
+function dodecahedron() {
+    var phi = (1 + Math.sqrt(5)) / 2;
+    var r = 1 / phi, t = phi;
+    var verts = [
+        [-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1],
+        [1, -1, -1], [1, -1, 1], [1, 1, -1], [1, 1, 1],
+        [0, -r, -t], [0, -r, t], [0, r, -t], [0, r, t],
+        [-r, -t, 0], [-r, t, 0], [r, -t, 0], [r, t, 0],
+        [-t, 0, -r], [t, 0, -r], [-t, 0, r], [t, 0, r]
+    ];
+    var tris = [
+        [3, 11, 7], [3, 7, 15], [3, 15, 13],
+        [7, 19, 17], [7, 17, 6], [7, 6, 15],
+        [17, 4, 8], [17, 8, 10], [17, 10, 6],
+        [8, 0, 16], [8, 16, 2], [8, 2, 10],
+        [0, 12, 1], [0, 1, 18], [0, 18, 16],
+        [6, 10, 2], [6, 2, 13], [6, 13, 15],
+        [2, 16, 18], [2, 18, 3], [2, 3, 13],
+        [18, 1, 9], [18, 9, 11], [18, 11, 3],
+        [4, 14, 12], [4, 12, 0], [4, 0, 8],
+        [11, 9, 5], [11, 5, 19], [11, 19, 7],
+        [19, 5, 14], [19, 14, 4], [19, 4, 17],
+        [1, 12, 14], [1, 14, 5], [1, 5, 9]
+    ];
+    return polyFromTris(verts, tris);
 }
 
 function orientFacesOutward(verts, faces) {
@@ -292,9 +386,7 @@ function numberTexture(label, baseColor) {
     ctx.shadowColor = 'rgba(0,0,0,.4)';
     ctx.shadowBlur = 12;
     ctx.fillText(String(label), s / 2, s / 2);
-    var tex = new THREE.CanvasTexture(c);
-    tex.anisotropy = 4;
-    return tex;
+    return new THREE.CanvasTexture(c);
 }
 
 function assignOppositeLabels(normals, n) {
@@ -322,9 +414,8 @@ function assignOppositeLabels(normals, n) {
 
 /* ---------- Crear dados ---------- */
 function buildRpgDie(facesData, label, colorHex) {
-    var data = facesData;
-    var verts = data.vertices;
-    var faces = orientFacesOutward(verts, data.faces);
+    var verts = facesData.vertices;
+    var faces = orientFacesOutward(verts, facesData.faces);
     var normals = faces.map(function (f) { return faceNormal(verts, f); });
     var labels = assignOppositeLabels(normals, faces.length);
 
@@ -333,9 +424,9 @@ function buildRpgDie(facesData, label, colorHex) {
 
     var geo = buildDieGeometry(scaled, faces, labels, colorHex);
     var mats = labels.map(function (l) {
-        var tex = numberTexture(l, colorHex);
-        var m = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.4, metalness: 0.1 });
-        return m;
+        return new THREE.MeshStandardMaterial({
+            map: numberTexture(l, colorHex), roughness: 0.4, metalness: 0.1
+        });
     });
     var mesh = new THREE.Mesh(geo, mats);
     mesh.castShadow = true;
@@ -345,7 +436,7 @@ function buildRpgDie(facesData, label, colorHex) {
     var body = new CANNON.Body({ mass: 1, material: dieMaterial });
     body.addShape(hull);
 
-    return { mesh: mesh, body: body, normals: normals, labels: labels, scale: scale };
+    return { mesh: mesh, body: body, normals: normals, labels: labels, scale: scale, isD6: false };
 }
 
 function buildD6(colorHex) {
@@ -369,8 +460,7 @@ function buildD6(colorHex) {
         if (normal[1] !== 0) { u = [1, 0, 0]; v = [0, 0, 1]; }
         else if (normal[0] !== 0) { u = [0, 0, 1]; v = [0, 1, 0]; }
         else { u = [1, 0, 0]; v = [0, 1, 0]; }
-        var pos = PIPS[d.val];
-        pos.forEach(function (p) {
+        PIPS[d.val].forEach(function (p) {
             var px = normal[0] * (half + offset) + p[0] * u[0] * 0.7 + p[1] * v[0] * 0.7;
             var py = normal[1] * (half + offset) + p[0] * u[1] * 0.7 + p[1] * v[1] * 0.7;
             var pz = normal[2] * (half + offset) + p[0] * u[2] * 0.7 + p[1] * v[2] * 0.7;
@@ -395,36 +485,34 @@ function buildD6(colorHex) {
 function createDie() {
     var colorHex = settings.color;
     if (dieType === 'd6') return buildD6(colorHex);
-    var def = DICE_TYPES.filter(function (d) { return d.id === dieType; })[0];
     var data = dieType === 'd10' ? decahedron()
-        : polyhedronFaces(new THREE.TetrahedronGeometry(1, 0));
-    if (dieType === 'd8') data = polyhedronFaces(new THREE.OctahedronGeometry(1, 0));
-    if (dieType === 'd12') data = polyhedronFaces(new THREE.DodecahedronGeometry(1, 0));
-    if (dieType === 'd20') data = polyhedronFaces(new THREE.IcosahedronGeometry(1, 0));
+        : dieType === 'd12' ? dodecahedron()
+        : dieType === 'd4' ? tetraFaces()
+        : dieType === 'd8' ? octaFaces()
+        : icosaFaces();
+    var def = DICE_TYPES.filter(function (d) { return d.id === dieType; })[0];
     return buildRpgDie(data, def.label, colorHex);
 }
 
 function getDieValue(die) {
-    var up = [0, 1, 0];
     var q = die.body.quaternion;
     var best = -2, value = 0;
     if (die.isD6) {
         die.dirs.forEach(function (d) {
-            var wx = d.dir[0], wy = d.dir[1], wz = d.dir[2];
-            var rx = (1 - 2 * (q.y * q.y + q.z * q.z)) * wx + 2 * (q.x * q.y - q.w * q.z) * wy + 2 * (q.x * q.z + q.w * q.y) * wz;
-            var ry = 2 * (q.x * q.y + q.w * q.z) * wx + (1 - 2 * (q.x * q.x + q.z * q.z)) * wy + 2 * (q.y * q.z - q.w * q.x) * wz;
-            var rz = 2 * (q.x * q.z - q.w * q.y) * wx + 2 * (q.y * q.z + q.w * q.x) * wy + (1 - 2 * (q.x * q.x + q.y * q.y)) * wz;
-            var dot = ry;
+            var nx = (1 - 2 * (q.y * q.y + q.z * q.z)) * d.dir[0] + 2 * (q.x * q.y - q.w * q.z) * d.dir[1] + 2 * (q.x * q.z + q.w * q.y) * d.dir[2];
+            var ny = 2 * (q.x * q.y + q.w * q.z) * d.dir[0] + (1 - 2 * (q.x * q.x + q.z * q.z)) * d.dir[1] + 2 * (q.y * q.z - q.w * q.x) * d.dir[2];
+            var nz = 2 * (q.x * q.z - q.w * q.y) * d.dir[0] + 2 * (q.y * q.z + q.w * q.x) * d.dir[1] + (1 - 2 * (q.x * q.x + q.y * q.y)) * d.dir[2];
+            var dot = ny;
             if (dot > best) { best = dot; value = d.val; }
         });
     } else {
         for (var i = 0; i < die.normals.length; i++) {
             var n = die.normals[i];
-            var nx = (1 - 2 * (q.y * q.y + q.z * q.z)) * n[0] + 2 * (q.x * q.y - q.w * q.z) * n[1] + 2 * (q.x * q.z + q.w * q.y) * n[2];
-            var ny = 2 * (q.x * q.y + q.w * q.z) * n[0] + (1 - 2 * (q.x * q.x + q.z * q.z)) * n[1] + 2 * (q.y * q.z - q.w * q.x) * n[2];
-            var nz = 2 * (q.x * q.z - q.w * q.y) * n[0] + 2 * (q.y * q.z + q.w * q.x) * n[1] + (1 - 2 * (q.x * q.x + q.y * q.y)) * n[2];
-            var dot = ny;
-            if (dot > best) { best = dot; value = die.labels[i]; }
+            var nx2 = (1 - 2 * (q.y * q.y + q.z * q.z)) * n[0] + 2 * (q.x * q.y - q.w * q.z) * n[1] + 2 * (q.x * q.z + q.w * q.y) * n[2];
+            var ny2 = 2 * (q.x * q.y + q.w * q.z) * n[0] + (1 - 2 * (q.x * q.x + q.z * q.z)) * n[1] + 2 * (q.y * q.z - q.w * q.x) * n[2];
+            var nz2 = 2 * (q.x * q.z - q.w * q.y) * n[0] + 2 * (q.y * q.z + q.w * q.x) * n[1] + (1 - 2 * (q.x * q.x + q.y * q.y)) * n[2];
+            var dot2 = ny2;
+            if (dot2 > best) { best = dot2; value = die.labels[i]; }
         }
     }
     return value;
@@ -474,43 +562,38 @@ function initUI() {
         b.textContent = d.label;
         b.onclick = function () {
             dieType = d.id;
-            settingsSaved = false;
             document.querySelectorAll('.dice-chip').forEach(function (c) { c.classList.remove('active'); });
             b.classList.add('active');
-            rebuildColorRow();
+            rebuildDice();
             renderStats();
         };
         diceRow.appendChild(b);
     });
 
     var colorRow = document.getElementById('colorRow');
-    function rebuildColorRow() {
-        colorRow.innerHTML = '';
-        COLORS.forEach(function (c) {
-            var sw = document.createElement('span');
-            sw.className = 'color-swatch' + (c === settings.color ? ' active' : '');
-            sw.style.background = c;
-            sw.onclick = function () {
-                settings.color = c;
-                saveSettings();
-                document.querySelectorAll('.color-swatch').forEach(function (x) { x.classList.remove('active'); });
-                sw.classList.add('active');
-                rebuildDice();
-            };
-            colorRow.appendChild(sw);
-        });
-        var custom = document.createElement('input');
-        custom.type = 'color';
-        custom.value = settings.color;
-        custom.onchange = function () {
-            settings.color = custom.value;
+    COLORS.forEach(function (c) {
+        var sw = document.createElement('span');
+        sw.className = 'color-swatch' + (c === settings.color ? ' active' : '');
+        sw.style.background = c;
+        sw.onclick = function () {
+            settings.color = c;
             saveSettings();
             document.querySelectorAll('.color-swatch').forEach(function (x) { x.classList.remove('active'); });
+            sw.classList.add('active');
             rebuildDice();
         };
-        colorRow.appendChild(custom);
-    }
-    rebuildColorRow();
+        colorRow.appendChild(sw);
+    });
+    var custom = document.createElement('input');
+    custom.type = 'color';
+    custom.value = settings.color;
+    custom.onchange = function () {
+        settings.color = custom.value;
+        saveSettings();
+        document.querySelectorAll('.color-swatch').forEach(function (x) { x.classList.remove('active'); });
+        rebuildDice();
+    };
+    colorRow.appendChild(custom);
 
     document.getElementById('optVibrate').checked = settings.vibrate;
     document.getElementById('optSound').checked = settings.sound;
@@ -524,7 +607,6 @@ function initUI() {
         settings.two = e.target.checked;
         saveSettings();
         rebuildDice();
-        updateCamera();
     };
 
     document.getElementById('btnSettings').onclick = function () {
@@ -541,47 +623,28 @@ function initUI() {
     };
 }
 
-var settingsSaved = false;
-
 function rebuildDice() {
+    if (!world) return;
     resetWorld();
-    var colorHex = settings.color;
-    var d = createDie();
-    d.mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-    d.body.position.set(0, 8, 0);
-    d.body.quaternion.set(Math.random(), Math.random(), Math.random(), Math.random());
-    d.body.angularVelocity.set(0, 0, 0);
-    d.body.velocity.set(0, 0, 0);
-    scene.add(d.mesh);
-    if (d.pips) d.pips.forEach(function (p) { p.material.color.set(colorHex === '#ffffff' ? 0x222222 : 0x111111); });
-    world.addBody(d.body);
-    activeDice.push(d);
-    if (settings.two) {
-        var d2 = createDie();
-        d2.body.position.set(1.2, 9, 0.3);
-        d2.body.quaternion.set(Math.random(), Math.random(), Math.random(), Math.random());
-        scene.add(d2.mesh);
-        world.addBody(d2.body);
-        activeDice.push(d2);
+    var count = settings.two ? 2 : 1;
+    for (var i = 0; i < count; i++) {
+        var d = createDie();
+        d.mesh.position.set(i * 1.1, 0.6, 0);
+        d.body.position.set(i * 1.1, 0.6, 0);
+        d.body.quaternion.set(Math.random(), Math.random(), Math.random(), Math.random());
+        scene.add(d.mesh);
+        world.addBody(d.body);
+        activeDice.push(d);
     }
     document.getElementById('rollBtn').classList.remove('disabled');
-}
-
-function updateCamera() {
-    if (settings.two) {
-        camera.position.set(4.5, 4.5, 7.5);
-        camera.lookAt(0, 0.3, 0);
-    } else {
-        camera.position.set(3.5, 4.2, 6.5);
-        camera.lookAt(0, 0.3, 0);
-    }
+    document.getElementById('result').textContent = 'Pulsa el botón para tirar';
 }
 
 function renderHistory() {
     var list = document.getElementById('historyList');
     list.innerHTML = '';
-    if (history.length === 0) { list.innerHTML = '<div style="opacity:.6;font-size:13px">Sin resultados aún</div>'; return; }
-    history.forEach(function (h) {
+    if (rollHistory.length === 0) { list.innerHTML = '<div style="opacity:.6;font-size:13px">Sin resultados aún</div>'; return; }
+    rollHistory.forEach(function (h) {
         var el = document.createElement('span');
         el.className = 'hist-item';
         el.textContent = h.values.join(' + ') + (h.double ? ' ✖2' : '');
@@ -595,7 +658,8 @@ function renderStats() {
     bars.innerHTML = '';
     var total = 0;
     Object.keys(stats).forEach(function (k) { total += stats[k]; });
-    for (var v = 1; v <= DICE_TYPES.filter(function (d) { return d.id === dieType; })[0].faces; v++) {
+    var faces = DICE_TYPES.filter(function (d) { return d.id === dieType; })[0].faces;
+    for (var v = 1; v <= faces; v++) {
         var cnt = stats[v] || 0;
         var pct = total > 0 ? (cnt / total * 100) : 0;
         var row = document.createElement('div');
@@ -609,13 +673,12 @@ function renderStats() {
 
 function updateHUD() {
     document.getElementById('stats').textContent = 'Tiradas: ' + totalRolls;
-    document.getElementById('result').textContent = '';
 }
 
 /* ---------- Lógica de tirada ---------- */
 function roll() {
-    if (rolling) return;
-    rolling = true;
+    if (rollInProgress || !world) return;
+    rollInProgress = true;
     document.getElementById('rollBtn').classList.add('disabled');
     document.getElementById('result').textContent = '🎲';
     document.getElementById('log').textContent = '';
@@ -623,80 +686,74 @@ function roll() {
     doVibrate(120);
 
     resetWorld();
-    var colorHex = settings.color;
     var count = settings.two ? 2 : 1;
     for (var i = 0; i < count; i++) {
         var d = createDie();
-        var sx = (i === 0 ? 0 : 1.2);
-        d.body.position.set(sx + (Math.random() - 0.5) * 0.6, 7 + Math.random() * 2, (Math.random() - 0.5) * 0.8);
+        var sx = (i === 0 ? 0 : 1.1) + (Math.random() - 0.5) * 0.4;
+        d.body.position.set(sx, 2.2 + Math.random(), (Math.random() - 0.5) * 0.8);
         d.body.quaternion.set(Math.random(), Math.random(), Math.random(), Math.random());
         d.body.angularVelocity.set(
-            (Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30
+            (Math.random() - 0.5) * 40, (Math.random() - 0.5) * 40, (Math.random() - 0.5) * 40
         );
-        d.body.velocity.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2);
+        d.body.velocity.set((Math.random() - 0.5) * 3, 1.5, (Math.random() - 0.5) * 3);
         scene.add(d.mesh);
-        if (d.pips) d.pips.forEach(function (p) { p.material.color.set(colorHex === '#ffffff' ? 0x222222 : 0x111111); });
         world.addBody(d.body);
         activeDice.push(d);
     }
+}
 
-    var settleTimer = 0;
-    var settleFrames = 0;
-    var settled = false;
+var settleFrames = 0;
 
-    function step() {
-        world.step(1 / 60);
-        activeDice.forEach(function (d) {
-            d.mesh.position.copy(d.body.position);
-            d.mesh.quaternion.copy(d.body.quaternion);
-        });
+function physicsLoop() {
+    if (!world) return;
+    world.step(1 / 60);
+    activeDice.forEach(function (d) {
+        d.mesh.position.copy(d.body.position);
+        d.mesh.quaternion.copy(d.body.quaternion);
+    });
+    if (rollInProgress) {
         var sleeping = activeDice.every(function (d) {
-            return d.body.velocity.lengthSquared() < 0.04 &&
-                   d.body.angularVelocity.lengthSquared() < 0.06;
+            return d.body.velocity.lengthSquared() < 0.05 &&
+                   d.body.angularVelocity.lengthSquared() < 0.08;
         });
-        if (sleeping) { settleFrames++; } else { settleFrames = 0; }
-        if (settleFrames > 8 && !settled) {
-            settled = true;
+        settleFrames = sleeping ? settleFrames + 1 : 0;
+        if (settleFrames > 10) {
+            rollInProgress = false;
             finishRoll();
-            return;
         }
-        if (!settled) requestAnimationFrame(step);
-    }
-    requestAnimationFrame(step);
-
-    function finishRoll() {
-        var values = activeDice.map(function (d) { return getDieValue(d); });
-        totalRolls++;
-        saveTotal();
-        var entry = { t: Date.now(), type: dieType, values: values };
-        if (values.length === 2) {
-            entry.sum = values[0] + values[1];
-            entry.double = values[0] === values[1];
-        }
-        history.unshift(entry);
-        history = history.slice(0, 50);
-        saveHistory();
-        renderHistory();
-
-        var stats = loadStats();
-        values.forEach(function (v) { stats[v] = (stats[v] || 0) + 1; });
-        saveStats(stats);
-        renderStats();
-        updateHUD();
-
-        var msg = values.join(' + ');
-        if (values.length === 2) msg += ' = ' + (entry.sum);
-        document.getElementById('log').textContent = msg;
-        if (entry.double) document.getElementById('log').textContent = '🎉 ¡DOBLES! ' + msg;
-        doVibrate(150);
-        rolling = false;
-        document.getElementById('rollBtn').classList.remove('disabled');
     }
 }
 
-/* ---------- Shake (desde Android o web) ---------- */
+function finishRoll() {
+    var values = activeDice.map(function (d) { return getDieValue(d); });
+    totalRolls++;
+    saveTotal();
+    var entry = { t: Date.now(), type: dieType, values: values };
+    if (values.length === 2) {
+        entry.sum = values[0] + values[1];
+        entry.double = values[0] === values[1];
+    }
+    rollHistory.unshift(entry);
+    rollHistory = rollHistory.slice(0, 50);
+    saveHistory();
+    renderHistory();
+
+    var stats = loadStats();
+    values.forEach(function (v) { stats[v] = (stats[v] || 0) + 1; });
+    saveStats(stats);
+    renderStats();
+    updateHUD();
+
+    var msg = values.join(' + ');
+    if (values.length === 2) msg += ' = ' + entry.sum;
+    document.getElementById('log').textContent = entry.double ? '🎉 ¡DOBLES! ' + msg : msg;
+    doVibrate(150);
+    document.getElementById('rollBtn').classList.remove('disabled');
+}
+
+/* ---------- Shake ---------- */
 window.onShake = function () {
-    if (settings.shake && !rolling) {
+    if (settings.shake && !rollInProgress) {
         initAudio();
         roll();
     }
@@ -705,18 +762,18 @@ window.onShake = function () {
 /* ---------- Loop de render ---------- */
 function animate() {
     requestAnimationFrame(animate);
-    renderer.render(scene, camera);
+    if (renderer && scene) {
+        physicsLoop();
+        renderer.render(scene, camera);
+    }
 }
 
 window.addEventListener('resize', function () {
+    if (!camera) return;
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    if (renderer) renderer.setSize(window.innerWidth, window.innerHeight);
 });
-
-window.addEventListener('touchstart', function (e) {
-    if (e.target.closest && !e.target.closest('#rollBtn')) initAudio();
-}, { passive: true });
 
 /* ---------- Init ---------- */
 loadHistory();
@@ -726,6 +783,12 @@ initUI();
 renderHistory();
 renderStats();
 updateHUD();
-rebuildDice();
-updateCamera();
-animate();
+
+try {
+    init3D();
+    rebuildDice();
+    animate();
+} catch (e) {
+    var el = document.getElementById('errorBox');
+    if (el) el.textContent = 'No se pudo iniciar el 3D: ' + e.message;
+}
