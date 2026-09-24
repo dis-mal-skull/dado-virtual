@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Dado Virtual</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="scene-container"></div>
+
+    <div id="log"></div>
+
+    <div class="hud" id="result">Pulsa el botón para tirar</div>
+    <div class="hud" id="stats">Tiradas: 0</div>
+
+    <div class="topbar">
+        <button class="icon-btn" id="btnSettings" title="Configuración">⚙️</button>
+        <button class="icon-btn" id="btnTheme" title="Tema">🌗</button>
+    </div>
+
+    <div class="panel" id="panel">
+        <h3>⚙️ Configuración</h3>
+
+        <div class="section-title">🎲 Tipo de dado</div>
+        <div class="dice-row" id="diceTypes"></div>
+
+        <div class="section-title">🎨 Color del dado</div>
+        <div class="color-row" id="colorRow"></div>
+
+        <div class="section-title">📜 Últimos 50 resultados</div>
+        <div class="history-list" id="historyList"></div>
+
+        <div class="section-title">📊 Estadísticas</div>
+        <div id="statBars"></div>
+
+        <div class="section-title">Opciones</div>
+        <div class="opt-row">
+            <span>📳 Vibración</span>
+            <label class="switch"><input type="checkbox" id="optVibrate" checked><span class="slider"></span></label>
+        </div>
+        <div class="opt-row">
+            <span>🔊 Sonido</span>
+            <label class="switch"><input type="checkbox" id="optSound" checked><span class="slider"></span></label>
+        </div>
+        <div class="opt-row">
+            <span>📱 Agitar para tirar</span>
+            <label class="switch"><input type="checkbox" id="optShake" checked><span class="slider"></span></label>
+        </div>
+        <div class="opt-row">
+            <span>🎲 2 dados</span>
+            <label class="switch"><input type="checkbox" id="optTwo"><span class="slider"></span></label>
+        </div>
+    </div>
+
+    <button id="rollBtn">🎲 TIRAR</button>
+
+    <script src="js/three.min.js"></script>
+    <script src="js/cannon.min.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
