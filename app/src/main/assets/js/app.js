@@ -20,6 +20,15 @@ var DICE_TYPES = [
 
 var COLORS = ['#e63946', '#2a9d8f', '#457b9d', '#f4a261', '#9b5de5', '#ffffff', '#2b2d42', '#7fbf7f'];
 
+/* color de pips con contraste según luminancia del dado */
+function pipColorFor(hex) {
+    var r = parseInt(hex.substr(1, 2), 16) / 255;
+    var g = parseInt(hex.substr(3, 2), 16) / 255;
+    var b = parseInt(hex.substr(5, 2), 16) / 255;
+    var lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return lum > 0.5 ? 0x141414 : 0xf5f5f5;
+}
+
 var PIPS = {
     1: [[0, 0]],
     2: [[-0.3, 0.3], [0.3, -0.3]],
@@ -102,6 +111,9 @@ function init3D() {
     scene.add(new THREE.AmbientLight(0xffffff, 0.65));
     var dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
     dirLight.position.set(5, 10, 6);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 512;
+    dirLight.shadow.mapSize.height = 512;
     scene.add(dirLight);
     scene.add(new THREE.DirectionalLight(0x88aaff, 0.35).translateX(-6));
 
@@ -169,7 +181,20 @@ function init3D() {
 function resetWorld() {
     for (var i = 0; i < activeDice.length; i++) {
         var d = activeDice[i];
-        if (d.mesh) scene.remove(d.mesh);
+        if (d.mesh) {
+            scene.remove(d.mesh);
+            if (d.mesh.geometry && d.mesh.geometry.dispose) d.mesh.geometry.dispose();
+            var mats = d.mesh.material;
+            if (mats) {
+                (Array.isArray(mats) ? mats : [mats]).forEach(function (m) {
+                    if (m.map && m.map.dispose) m.map.dispose();
+                    if (m.dispose) m.dispose();
+                });
+            }
+        }
+        if (d.pips) d.pips.forEach(function (p) {
+            if (p.geometry && p.geometry.dispose) p.geometry.dispose();
+        });
         if (d.body) world.removeBody(d.body);
     }
     activeDice = [];
@@ -464,7 +489,7 @@ function buildD6(colorHex) {
         { dir: [0, 0, 1], val: 5 }, { dir: [0, 0, -1], val: 2 }
     ];
     var half = DIE_SIZE / 2;
-    var pipMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.3, metalness: 0.2 });
+    var pipMat = new THREE.MeshStandardMaterial({ color: pipColorFor(colorHex), roughness: 0.3, metalness: 0.2 });
     var offset = 0.02;
     dirs.forEach(function (d) {
         var normal = d.dir;
@@ -484,11 +509,12 @@ function buildD6(colorHex) {
     });
 
     var body = new CANNON.Body({ mass: 1, material: dieMaterial });
-    body.addShape(new CANNON.Box(new CANNON.Vec3(0.45, 0.45, 0.45)));
-    var r = 0.24;
+    /* caja 0.44 + esferas 0.06 en esquinas = extents 0.5 exactos (igual que el mesh) */
+    body.addShape(new CANNON.Box(new CANNON.Vec3(0.44, 0.44, 0.44)));
+    var r = 0.06;
     [[1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
      [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1]].forEach(function (s) {
-        body.addShape(new CANNON.Sphere(r), new CANNON.Vec3(s[0] * 0.5, s[1] * 0.5, s[2] * 0.5));
+        body.addShape(new CANNON.Sphere(r), new CANNON.Vec3(s[0] * 0.44, s[1] * 0.44, s[2] * 0.44));
     });
 
     return { mesh: mesh, body: body, pips: pips, dirs: dirs, isD6: true };
@@ -567,6 +593,7 @@ function doVibrate(ms) {
 
 /* ---------- UI ---------- */
 function initUI() {
+    if (settings.type) dieType = settings.type;
     var diceRow = document.getElementById('diceTypes');
     DICE_TYPES.forEach(function (d) {
         var b = document.createElement('button');
@@ -574,6 +601,8 @@ function initUI() {
         b.textContent = d.label;
         b.onclick = function () {
             dieType = d.id;
+            settings.type = d.id;
+            saveSettings();
             document.querySelectorAll('.dice-chip').forEach(function (c) { c.classList.remove('active'); });
             b.classList.add('active');
             rebuildDice();
@@ -648,18 +677,18 @@ function initUI() {
 
 function rebuildDice() {
     if (!world) return;
+    rollInProgress = false;
     resetWorld();
     var count = settings.two ? 2 : 1;
     for (var i = 0; i < count; i++) {
         var d = createDie();
-        d.mesh.position.set(i * 1.1, 0.6, 0);
-        d.body.position.set(i * 1.1, 0.6, 0);
+        d.mesh.position.set(i * 1.3, 0.6, 0);
+        d.body.position.set(i * 1.3, 0.6, 0);
         d.body.quaternion.set(Math.random(), Math.random(), Math.random(), Math.random());
         scene.add(d.mesh);
         world.addBody(d.body);
         activeDice.push(d);
     }
-    document.getElementById('rollBtn').classList.remove('disabled');
     document.getElementById('result').textContent = 'Pulsa el botón para tirar';
 }
 
@@ -709,10 +738,9 @@ function roll() {
     if (rollInProgress) {
         resetWorld();
     }
-    rollInProgress = true;
+rollInProgress = true;
     rollStartTime = Date.now();
     settleFrames = 0;
-    document.getElementById('rollBtn').classList.add('disabled');
     document.getElementById('result').textContent = '🎲';
     document.getElementById('log').textContent = '';
     playSound();
@@ -722,7 +750,7 @@ function roll() {
     var count = settings.two ? 2 : 1;
     for (var i = 0; i < count; i++) {
         var d = createDie();
-        var sx = (i === 0 ? 0 : 1.1) + (Math.random() - 0.5) * 0.4;
+        var sx = (i === 0 ? 0 : 1.3) + (Math.random() - 0.5) * 0.4;
         d.body.position.set(sx, 2.2 + Math.random(), (Math.random() - 0.5) * 0.8);
         d.body.quaternion.set(Math.random(), Math.random(), Math.random(), Math.random());
         d.body.angularVelocity.set(
@@ -739,12 +767,11 @@ var settleFrames = 0;
 
 function keepInBounds(d) {
     var p = d.body.position;
-    var out = false;
-    if (p.x > SAFE_LIMIT || p.x < -SAFE_LIMIT ||
+    var bad = !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z);
+    var out = bad ||
+        p.x > SAFE_LIMIT || p.x < -SAFE_LIMIT ||
         p.z > SAFE_LIMIT || p.z < -SAFE_LIMIT ||
-        p.y < -2.5 || p.y > 4.5) {
-        out = true;
-    }
+        p.y < -2.5 || p.y > 4.5;
     if (out) {
         /* reposicionar el dado dentro de la zona segura */
         d.body.position.set(0, 1.2, 0);
@@ -778,7 +805,6 @@ function physicsLoop() {
 
 function finishRoll() {
     if (!activeDice.length) {
-        document.getElementById('rollBtn').classList.remove('disabled');
         return;
     }
     var values = activeDice.map(function (d) { return getDieValue(d); });
@@ -804,7 +830,6 @@ function finishRoll() {
     if (values.length === 2) msg += ' = ' + entry.sum;
     document.getElementById('log').textContent = entry.double ? '🎉 ¡DOBLES! ' + msg : msg;
     doVibrate(150);
-    document.getElementById('rollBtn').classList.remove('disabled');
 }
 
 /* ---------- Shake ---------- */

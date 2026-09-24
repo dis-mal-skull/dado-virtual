@@ -6,6 +6,7 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -46,6 +47,7 @@ public class MainActivity extends Activity implements SensorEventListener {
     @Override
     protected void onResume() {
         super.onResume();
+        if (webView != null) webView.onResume();
         if (accelerometer != null) {
             sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME);
         }
@@ -55,10 +57,18 @@ public class MainActivity extends Activity implements SensorEventListener {
     protected void onPause() {
         super.onPause();
         sensorManager.unregisterListener(this);
+        if (webView != null) webView.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (webView != null) webView.destroy();
+        super.onDestroy();
     }
 
     @Override
     public void onSensorChanged(SensorEvent event) {
+        if (webView == null) return;
         float x = event.values[0];
         float y = event.values[1];
         float z = event.values[2];
@@ -79,8 +89,11 @@ public class MainActivity extends Activity implements SensorEventListener {
     private class Bridge {
         @JavascriptInterface
         public void vibrate(long ms) {
-            if (vibrator != null && vibrator.hasVibrator()) {
+            if (vibrator == null || !vibrator.hasVibrator()) return;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 vibrator.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE));
+            } else {
+                vibrator.vibrate(ms);
             }
         }
     }
