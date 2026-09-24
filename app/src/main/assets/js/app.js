@@ -112,11 +112,11 @@ function init3D() {
     table.receiveShadow = true;
     scene.add(table);
 
-    /* Paredes alrededor para que el dado rebote */
+    /* Paredes alrededor para que el dado rebote (zona segura) */
     var wallMat = new THREE.MeshStandardMaterial({
         color: 0x1c2833, roughness: 0.9, transparent: true, opacity: 0.35
     });
-    var wallH = 2.4, t = 3.5;
+    var wallH = 3.2, t = 3.5;
     var wallDefs = [
         { w: 7.2, h: wallH, d: 0.4, x: 0, y: wallH / 2 - 0.25, z: t },
         { w: 7.2, h: wallH, d: 0.4, x: 0, y: wallH / 2 - 0.25, z: -t },
@@ -152,6 +152,18 @@ function init3D() {
         world.addBody(b);
         wallBodies.push(b);
     });
+
+    /* Suelo de seguridad: si el dado escapa de la mesa, cae aquí y no al vacío */
+    var catchBody = new CANNON.Body({ mass: 0 });
+    catchBody.addShape(new CANNON.Box(new CANNON.Vec3(8, 0.3, 8)));
+    catchBody.position.y = -3.2;
+    world.addBody(catchBody);
+    var catchMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(16, 0.6, 16),
+        new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 1 })
+    );
+    catchMesh.position.y = -3.2;
+    scene.add(catchMesh);
 }
 
 function resetWorld() {
@@ -612,6 +624,17 @@ function initUI() {
     document.getElementById('btnSettings').onclick = function () {
         document.getElementById('panel').classList.toggle('show');
     };
+    document.getElementById('btnClose').onclick = function () {
+        document.getElementById('panel').classList.remove('show');
+    };
+    /* cerrar panel al hacer click fuera */
+    document.addEventListener('click', function (e) {
+        var panel = document.getElementById('panel');
+        if (!panel.classList.contains('show')) return;
+        if (panel.contains(e.target)) return;
+        if (e.target.id === 'btnSettings') return;
+        panel.classList.remove('show');
+    });
     document.getElementById('btnTheme').onclick = function () {
         settings.theme = settings.theme === 'dark' ? 'light' : 'dark';
         saveSettings();
@@ -676,9 +699,19 @@ function updateHUD() {
 }
 
 /* ---------- Lógica de tirada ---------- */
+var rollStartTime = 0;
+var MAX_ROLL_MS = 8000;
+var SAFE_LIMIT = 3.2;
+
 function roll() {
-    if (rollInProgress || !world) return;
+    if (!world) return;
+    /* permite re-tirar aunque haya una tirada en curso */
+    if (rollInProgress) {
+        resetWorld();
+    }
     rollInProgress = true;
+    rollStartTime = Date.now();
+    settleFrames = 0;
     document.getElementById('rollBtn').classList.add('disabled');
     document.getElementById('result').textContent = '🎲';
     document.getElementById('log').textContent = '';
@@ -704,10 +737,28 @@ function roll() {
 
 var settleFrames = 0;
 
+function keepInBounds(d) {
+    var p = d.body.position;
+    var out = false;
+    if (p.x > SAFE_LIMIT || p.x < -SAFE_LIMIT ||
+        p.z > SAFE_LIMIT || p.z < -SAFE_LIMIT ||
+        p.y < -2.5 || p.y > 4.5) {
+        out = true;
+    }
+    if (out) {
+        /* reposicionar el dado dentro de la zona segura */
+        d.body.position.set(0, 1.2, 0);
+        d.body.velocity.set(0, 0, 0);
+        d.body.angularVelocity.set(0, 0, 0);
+        d.body.quaternion.set(Math.random(), Math.random(), Math.random(), Math.random());
+    }
+}
+
 function physicsLoop() {
     if (!world) return;
     world.step(1 / 60);
     activeDice.forEach(function (d) {
+        keepInBounds(d);
         d.mesh.position.copy(d.body.position);
         d.mesh.quaternion.copy(d.body.quaternion);
     });
@@ -717,7 +768,8 @@ function physicsLoop() {
                    d.body.angularVelocity.lengthSquared() < 0.08;
         });
         settleFrames = sleeping ? settleFrames + 1 : 0;
-        if (settleFrames > 10) {
+        var timedOut = (Date.now() - rollStartTime) > MAX_ROLL_MS;
+        if (settleFrames > 10 || timedOut) {
             rollInProgress = false;
             finishRoll();
         }
@@ -725,6 +777,10 @@ function physicsLoop() {
 }
 
 function finishRoll() {
+    if (!activeDice.length) {
+        document.getElementById('rollBtn').classList.remove('disabled');
+        return;
+    }
     var values = activeDice.map(function (d) { return getDieValue(d); });
     totalRolls++;
     saveTotal();
@@ -753,7 +809,7 @@ function finishRoll() {
 
 /* ---------- Shake ---------- */
 window.onShake = function () {
-    if (settings.shake && !rollInProgress) {
+    if (settings.shake && world) {
         initAudio();
         roll();
     }
